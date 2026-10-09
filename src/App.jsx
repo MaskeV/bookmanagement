@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-
-const API = "http://localhost:8080/api/books";
+import "./App.css";
+import AuthPage from "./AuthPage";
+import { API, authFetch, clearSession, getSession } from "./Api";
 
 const fields = [
   { name: "title", label: "Title" },
@@ -14,44 +15,97 @@ const fields = [
 ];
 
 const emptyForm = { available: true };
+const emptyFilters = { category: "", language: "", publisher: "", available: "" };
 
-export default function App() {
+// Keyword fields match the exact value, so we compare exact (case-insensitive) values
+const applyFilters = (list, f) =>
+  list.filter(
+    (b) =>
+      (!f.category || b.category?.toLowerCase() === f.category.toLowerCase()) &&
+      (!f.language || b.language?.toLowerCase() === f.language.toLowerCase()) &&
+      (!f.publisher || b.publisher?.toLowerCase() === f.publisher.toLowerCase()) &&
+      (!f.available || String(!!b.available) === f.available)
+  );
+
+// unique, sorted values of one field (for the dropdowns)
+const uniqueValues = (list, field) =>
+  [...new Set(list.map((b) => b[field]).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+
+function BookManager({ user, onLogout }) {
   const [books, setBooks] = useState([]);
   const [form, setForm] = useState(emptyForm);
   const [search, setSearch] = useState("");
+  const [filters, setFilters] = useState(emptyFilters);
+  const [allBooks, setAllBooks] = useState([]); // used only to build the dropdown options
   const [suggestions, setSuggestions] = useState([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [activeIndex, setActiveIndex] = useState(-1);
   const searchBoxRef = useRef(null);
+  // normal users (role USER) can only view and search; everyone else can add, edit and delete
+  const canEdit = user.role !== "USER";
 
   // ---------- API calls ----------
-  const loadBooks = async (query = "") => {
-    const url = query ? `${API}/search?query=${encodeURIComponent(query)}` : API;
-    const res = await fetch(url);
-    setBooks(await res.json());
+  // Loads books for a search text + filters.
+  // Filters are sent to the backend as query params (category, language, publisher, available)
+  // and also applied here, so the table is correct even if the backend ignores a param.
+  const loadBooks = async (query = "", f = emptyFilters) => {
+    const params = new URLSearchParams();
+    if (query) params.set("query", query);
+    Object.entries(f).forEach(([key, value]) => value && params.set(key, value));
+
+    const url = params.toString() ? `${API}/search?${params}` : API;
+    const res = await authFetch(url);
+    setBooks(applyFilters(await res.json(), f));
+  };
+
+  const loadAllBooks = async () => {
+    const res = await authFetch(API);
+    setAllBooks(await res.json());
+  };
+
+  const refresh = () => {
+    loadBooks(search, filters);
+    loadAllBooks();
   };
 
   useEffect(() => {
     loadBooks();
+    loadAllBooks();
   }, []);
+
+  const changeFilter = (name, value) => {
+    const next = { ...filters, [name]: value };
+    setFilters(next);
+    loadBooks(search, next);
+  };
+
+  const clearFilters = () => {
+    setFilters(emptyFilters);
+    loadBooks(search, emptyFilters);
+  };
+
+  const hasFilters = Object.values(filters).some(Boolean);
 
   const saveBook = async (e) => {
     e.preventDefault();
-    await fetch(form.id ? `${API}/${form.id}` : API, {
+    await authFetch(form.id ? `${API}/${form.id}` : API, {
       method: form.id ? "PUT" : "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(form),
     });
     setForm(emptyForm);
-    loadBooks(search);
+    refresh();
   };
 
   const deleteBook = async (id) => {
     if (!window.confirm("Delete this book?")) return;
-    await fetch(`${API}/${id}`, { method: "DELETE" });
-    loadBooks(search);
+    await authFetch(`${API}/${id}`, { method: "DELETE" });
+    refresh();
   };
 
+  // ---------- Search suggestions (like Amazon) ----------
+  // While typing, wait 250ms, ask the backend for matches,
+  // and build a short list of unique titles / authors.
   useEffect(() => {
     const text = search.trim();
     if (!text) {
@@ -62,7 +116,7 @@ export default function App() {
     let cancelled = false;
     const timer = setTimeout(async () => {
       try {
-        const res = await fetch(`${API}/search?query=${encodeURIComponent(text)}`);
+        const res = await authFetch(`${API}/search?query=${encodeURIComponent(text)}`);
         const data = await res.json();
         const lower = text.toLowerCase();
         const unique = new Set();
@@ -88,7 +142,7 @@ export default function App() {
     };
   }, [search]);
 
- 
+  // close the dropdown when clicking outside the search box
   useEffect(() => {
     const handleClick = (e) => {
       if (searchBoxRef.current && !searchBoxRef.current.contains(e.target)) {
@@ -102,7 +156,7 @@ export default function App() {
   const runSearch = (text) => {
     setSearch(text);
     setShowSuggestions(false);
-    loadBooks(text);
+    loadBooks(text, filters);
   };
 
   const handleSearchKeys = (e) => {
@@ -145,11 +199,15 @@ export default function App() {
 
   return (
     <div className="page">
-      <style>{css}</style>
-
       <header className="header">
-        <h1>Book Management</h1>
-        <p>{books.length} {books.length === 1 ? "book" : "books"} in the library</p>
+        <div>
+          <h1>Book Management</h1>
+          <p>{books.length} {books.length === 1 ? "book" : "books"} in the library</p>
+        </div>
+        <div className="user-box">
+          <span>{user.name}{user.role ? ` (${user.role})` : ""}</span>
+          <button onClick={onLogout}>Log out</button>
+        </div>
       </header>
 
       {/* Search with suggestions */}
@@ -179,7 +237,7 @@ export default function App() {
               onClick={() => {
                 setSearch("");
                 setSuggestions([]);
-                loadBooks();
+                loadBooks("", filters);
               }}
             >
               ✕
@@ -197,7 +255,7 @@ export default function App() {
                 onMouseEnter={() => setActiveIndex(i)}
                 onClick={() => runSearch(s)}
               >
-                <span className="icon"></span>
+                <span className="icon">🔍</span>
                 <div>{renderSuggestion(s)}</div>
               </li>
             ))}
@@ -205,7 +263,56 @@ export default function App() {
         )}
       </div>
 
+      {/* Filters */}
+      <div className="card filters">
+        <label>
+          Category
+          <select value={filters.category} onChange={(e) => changeFilter("category", e.target.value)}>
+            <option value="">All</option>
+            {uniqueValues(allBooks, "category").map((v) => (
+              <option key={v} value={v}>{v}</option>
+            ))}
+          </select>
+        </label>
+
+        <label>
+          Language
+          <select value={filters.language} onChange={(e) => changeFilter("language", e.target.value)}>
+            <option value="">All</option>
+            {uniqueValues(allBooks, "language").map((v) => (
+              <option key={v} value={v}>{v}</option>
+            ))}
+          </select>
+        </label>
+
+        <label>
+          Publisher
+          <select value={filters.publisher} onChange={(e) => changeFilter("publisher", e.target.value)}>
+            <option value="">All</option>
+            {uniqueValues(allBooks, "publisher").map((v) => (
+              <option key={v} value={v}>{v}</option>
+            ))}
+          </select>
+        </label>
+
+        <label>
+          Status
+          <select value={filters.available} onChange={(e) => changeFilter("available", e.target.value)}>
+            <option value="">All</option>
+            <option value="true">Available</option>
+            <option value="false">Not available</option>
+          </select>
+        </label>
+
+        {hasFilters && (
+          <button type="button" className="btn gray clear-filters" onClick={clearFilters}>
+            Clear filters
+          </button>
+        )}
+      </div>
+
       {/* Add / edit form */}
+      {canEdit && (
       <form className="card form" onSubmit={saveBook}>
         <h2>{form.id ? "Edit book" : "Add a new book"}</h2>
         <div className="grid">
@@ -240,6 +347,7 @@ export default function App() {
           </div>
         </div>
       </form>
+      )}
 
       {/* Table */}
       <div className="card table-wrap">
@@ -254,7 +362,7 @@ export default function App() {
               <th>Qty</th>
               <th>Status</th>
               <th>Description</th>
-              <th>Actions</th>
+              {canEdit && <th>Actions</th>}
             </tr>
           </thead>
           <tbody>
@@ -274,6 +382,7 @@ export default function App() {
                   </span>
                 </td>
                 <td className="desc">{book.description}</td>
+                {canEdit && (
                 <td className="actions">
                   <button
                     className="btn small blue"
@@ -288,6 +397,7 @@ export default function App() {
                     Delete
                   </button>
                 </td>
+                )}
               </tr>
             ))}
             {books.length === 0 && (
@@ -304,61 +414,15 @@ export default function App() {
   );
 }
 
-const css = `
-  body { margin: 0; background: #f1f5f9; }
-  .page { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; font-family: system-ui, Segoe UI, sans-serif; color: #1e293b; }
+// Shows the login/signup page until the user is logged in
+export default function App() {
+  const [session, setSession] = useState(getSession());
 
-  .header { background: linear-gradient(135deg, #4338ca, #0e7490); color: #fff; padding: 24px 28px; border-radius: 14px; margin-bottom: 20px; }
-  .header h1 { margin: 0; font-size: 28px; }
-  .header p { margin: 4px 0 0; opacity: .85; }
+  const logout = () => {
+    clearSession();
+    setSession(null);
+  };
 
-  .card { background: #fff; border-radius: 14px; box-shadow: 0 2px 10px rgba(15, 23, 42, .07); padding: 20px; margin-bottom: 20px; }
-
-  /* search */
-  .search { position: relative; margin-bottom: 20px; }
-  .search-bar { display: flex; background: #fff; border: 2px solid #f59e0b; border-radius: 10px; overflow: hidden; }
-  .search-bar input { flex: 1; border: none; outline: none; padding: 12px 14px; font-size: 16px; }
-  .search-btn { background: #f59e0b; border: none; padding: 0 22px; font-weight: 600; color: #1e293b; cursor: pointer; }
-  .search-btn:hover { background: #d97706; color: #fff; }
-  .clear { background: none; border: none; color: #94a3b8; font-size: 16px; padding: 0 12px; cursor: pointer; }
-  .suggestions { position: absolute; top: 100%; left: 0; right: 0; z-index: 10; list-style: none; margin: 4px 0 0; padding: 6px 0; background: #fff; border-radius: 10px; box-shadow: 0 8px 24px rgba(15, 23, 42, .18); }
-  .suggestions li { display: flex; align-items: center; gap: 10px; padding: 9px 16px; cursor: pointer; }
-  .suggestions li.active { background: #fef3c7; }
-  .suggestions .icon { font-size: 13px; opacity: .5; }
-  .suggestions b { font-weight: 700; }
-
-  /* form */
-  .form h2 { margin: 0 0 14px; font-size: 18px; color: #4338ca; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; }
-  .grid label { display: flex; flex-direction: column; font-size: 13px; font-weight: 600; color: #475569; gap: 5px; }
-  .grid label.wide { grid-column: 1 / -1; }
-  .grid input { padding: 10px; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 15px; font-weight: 400; color: #1e293b; }
-  .grid input:focus { outline: none; border-color: #4338ca; box-shadow: 0 0 0 3px rgba(67, 56, 202, .15); }
-  .form-actions { display: flex; justify-content: space-between; align-items: center; margin-top: 16px; }
-  .check { display: flex; align-items: center; gap: 8px; font-weight: 600; color: #475569; }
-
-  /* buttons */
-  .btn { border: none; border-radius: 8px; padding: 10px 18px; font-weight: 600; cursor: pointer; color: #fff; margin-left: 8px; }
-  .btn.primary { background: #4338ca; }
-  .btn.primary:hover { background: #3730a3; }
-  .btn.gray { background: #64748b; }
-  .btn.small { padding: 6px 12px; font-size: 13px; margin: 0 4px 0 0; }
-  .btn.blue { background: #0284c7; }
-  .btn.red { background: #dc2626; }
-
-  /* table */
-  .table-wrap { padding: 0; overflow-x: auto; }
-  table { width: 100%; border-collapse: collapse; }
-  th { background: #4338ca; color: #fff; text-align: left; padding: 12px; font-size: 14px; white-space: nowrap; }
-  td { padding: 12px; border-bottom: 1px solid #e2e8f0; font-size: 14px; vertical-align: top; }
-  tbody tr:nth-child(even) { background: #f8fafc; }
-  tbody tr:hover { background: #eef2ff; }
-  td.title { font-weight: 600; }
-  td.desc { max-width: 220px; color: #64748b; }
-  td.actions { white-space: nowrap; }
-  td.empty { text-align: center; color: #94a3b8; padding: 28px; }
-  .tag { background: #e0f2fe; color: #0369a1; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
-  .badge { padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; }
-  .badge.ok { background: #dcfce7; color: #15803d; }
-  .badge.no { background: #fee2e2; color: #b91c1c; }
-`;
+  if (!session?.token) return <AuthPage onLogin={setSession} />;
+  return <BookManager user={session} onLogout={logout} />;
+}
